@@ -10,7 +10,7 @@
 #define TIME_TO_SLEEP  30   
 RTC_DATA_ATTR int bootCount = 0;
 
-void print_wakeup_reason(){
+/*void print_wakeup_reason(){
   esp_sleep_wakeup_cause_t wakeup_reason;
 
   wakeup_reason = esp_sleep_get_wakeup_cause();
@@ -20,7 +20,7 @@ void print_wakeup_reason(){
     case ESP_SLEEP_WAKEUP_TIMER : Serial.println("Wakeup caused by timer"); break;
     default : Serial.printf("Wakeup was not caused by deep sleep: %d\n",wakeup_reason); break;
   }
-}
+}*/
 
 
 
@@ -28,7 +28,7 @@ unsigned long lastTime = 0;
 // Set timer to 10 minutes (600000)
 //unsigned long timerDelay = 600000;
 // Timer set to 10 seconds (10000)
-unsigned long timerDelay = 2000;
+unsigned long timerDelay = 100;
 const long  gmtOffset_sec = 3600;
 const int   daylightOffset_sec = 3600;
 
@@ -124,7 +124,7 @@ void loop() {
       }
       else {
         Serial.println("WiFi Disconnected");
-        esp_sleep_enable_timer_wakeup(TIME_TO_SLEEP * uS_TO_S_FACTOR);
+        /*esp_sleep_enable_timer_wakeup(TIME_TO_SLEEP * uS_TO_S_FACTOR);
         Serial.println("Setup ESP32 to sleep for every " + String(TIME_TO_SLEEP) +
           " Seconds");
 
@@ -133,7 +133,7 @@ void loop() {
         esp_deep_sleep_start();
         Serial.println("This will never be printed");
       }
-      newDataReady = 0;
+      newDataReady = 0;*/
    }
   Serial.println("next reading");
   delay(timerDelay);
