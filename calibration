@@ -1,0 +1,275 @@
+#include <WiFi.h>
+#include <HTTPClient.h>
+#include <HX711_ADC.h>
+#include "time.h"
+
+#if defined(ESP8266)|| defined(ESP32) || defined(AVR)
+#include <EEPROM.h>
+#endif
+#define uS_TO_S_FACTOR 1000000ULL 
+#define TIME_TO_SLEEP  30   
+RTC_DATA_ATTR int bootCount = 0;
+
+void print_wakeup_reason(){
+  esp_sleep_wakeup_cause_t wakeup_reason;
+
+  wakeup_reason = esp_sleep_get_wakeup_cause();
+
+  switch(wakeup_reason)
+  {
+    case ESP_SLEEP_WAKEUP_TIMER : Serial.println("Wakeup caused by timer"); break;
+    default : Serial.printf("Wakeup was not caused by deep sleep: %d\n",wakeup_reason); break;
+  }
+}
+
+
+
+unsigned long lastTime = 0;
+// Set timer to 10 minutes (600000)
+//unsigned long timerDelay = 600000;
+// Timer set to 10 seconds (10000)
+unsigned long timerDelay = 2000;
+const long  gmtOffset_sec = 3600;
+const int   daylightOffset_sec = 3600;
+
+
+//WiFi config...
+String apiKey = "M7XQIEJ7JLTPW7A7";                  
+const char *ssid =  "Surya’s iPhone";                                  
+const char *pass =  "8977994755";
+const char* serverName = "http://api.thingspeak.com/update";
+WiFiClient client;
+
+//HX711 interfacing
+const int HX711_dout = 2; //mcu > HX711 dout pin
+const int HX711_sck = 4; //mcu > HX711 sck pin
+
+//HX711 constructor
+HX711_ADC LoadCell(HX711_dout, HX711_sck);
+
+const int calVal_eepromAdress = 0;
+unsigned long t = 0;
+
+void setup() {
+  Serial.begin(115200); 
+  delay(5000);
+
+  //Increment boot number and print it every reboot
+  ++bootCount;
+  Serial.println("Boot number: " + String(bootCount));
+
+  //Print the wakeup reason for ESP32
+  print_wakeup_reason();
+  Serial.println("Time to take your Pills");
+  
+  //WiFi connect
+  Serial.println("Connecting to ");
+  Serial.println(ssid);
+  WiFi.begin(ssid, pass);
+  while (WiFi.status() != WL_CONNECTED) 
+  {
+    delay(500);
+    Serial.print(".");
+  }
+  Serial.println("");
+  Serial.println("WiFi connected");
+
+  //HX711 calibration
+  delay(10000);
+  Serial.println();
+  Serial.println("Starting load cell callibration...");
+  
+  LoadCell.begin();
+  unsigned long stabilizingtime = 2000; // preciscion right after power-up can be improved by adding a few seconds of stabilizing time
+  boolean _tare = true; //set this to false if you don't want tare to be performed in the next step
+  LoadCell.start(stabilizingtime, _tare);
+  if (LoadCell.getTareTimeoutFlag() || LoadCell.getSignalTimeoutFlag()) {
+    Serial.println("Timeout, check MCU>HX711 wiring and pin designations");
+    while (1);
+  }
+  else {
+    LoadCell.setCalFactor(1.0); // user set calibration value (float), initial value 1.0 may be used for this sketch
+    Serial.println("Startup is complete");
+  }
+  while (!LoadCell.update());
+  calibrate(); //start calibration procedure
+  
+}
+
+void loop() {
+
+  
+  static boolean newDataReady = 0;
+
+  // check for new data/start next conversion:+++++=
+  if (LoadCell.update()) newDataReady = true;
+
+  // get smoothed value from the dataset:
+    
+    if(newDataReady) {
+      float i = LoadCell.getData();
+      Serial.print("Load_cell output val: ");
+      Serial.println(i);  
+
+    //Check WiFi connection status
+      if(WiFi.status()== WL_CONNECTED){
+        HTTPClient http;
+        http.begin(serverName);
+        http.addHeader("Content-Type", "application/x-www-form-urlencoded");
+        String httpRequestData = "api_key=" + apiKey + "&field1=" + String(i);           
+        int httpResponseCode = http.POST(httpRequestData);      
+        Serial.print("HTTP Response code: ");
+        Serial.println(httpResponseCode);
+        http.end();
+      }
+      else {
+        Serial.println("WiFi Disconnected");
+        esp_sleep_enable_timer_wakeup(TIME_TO_SLEEP * uS_TO_S_FACTOR);
+        Serial.println("Setup ESP32 to sleep for every " + String(TIME_TO_SLEEP) +
+          " Seconds");
+
+        Serial.println("Going to sleep now");
+        Serial.flush(); 
+        esp_deep_sleep_start();
+        Serial.println("This will never be printed");
+      }
+      newDataReady = 0;
+   }
+  Serial.println("next reading");
+  delay(timerDelay);
+}
+
+void calibrate() {
+  Serial.println("***");
+  Serial.println("Start calibration:");
+  Serial.println("Place the load cell an a level stable surface.");
+  Serial.println("Remove any load applied to the load cell.");
+  Serial.println("Send 't' from serial monitor to set the tare offset.");
+
+  boolean _resume = false;
+  while (_resume == false) {
+    LoadCell.update();
+    if (Serial.available() > 0) {
+      if (Serial.available() > 0) {
+        char inByte = Serial.read();
+        if (inByte == 't') LoadCell.tareNoDelay();
+      }
+    }
+    if (LoadCell.getTareStatus() == true) {
+      Serial.println("Tare complete");
+      _resume = true;
+    }
+  }
+
+  Serial.println("Now, place your known mass on the loadcell.");
+  Serial.println("Then send the weight of this mass (i.e. 100.0) from serial monitor.");
+
+  float known_mass = 0;
+  _resume = false;
+  while (_resume == false) {
+    LoadCell.update();
+    if (Serial.available() > 0) {
+      known_mass = Serial.parseFloat();
+       if (known_mass != 0) {
+        Serial.print("Known mass is: ");
+        Serial.println(known_mass);
+        _resume = true;
+      }
+    }
+  }
+
+  LoadCell.refreshDataSet(); //refresh the dataset to be sure that the known mass is measured correct
+  float newCalibrationValue = LoadCell.getNewCalibration(known_mass); //get the new calibration value
+
+  Serial.print("New calibration value has been set to: ");
+  Serial.print(newCalibrationValue);
+  Serial.println(", use this as calibration value (calFactor) in your project sketch.");
+  Serial.print("Save this value to EEPROM adress ");
+  Serial.print(calVal_eepromAdress);
+  Serial.println("? y/n");
+
+  _resume = false;
+  while (_resume == false) {
+    if (Serial.available() > 0) {
+      char inByte = Serial.read();
+      if (inByte == 'y') {
+        #if defined(ESP8266)|| defined(ESP32)
+        EEPROM.begin(512);
+        #endif
+        EEPROM.put(calVal_eepromAdress, newCalibrationValue);
+        #if defined(ESP8266)|| defined(ESP32)
+        EEPROM.commit();
+        #endif
+        EEPROM.get(calVal_eepromAdress, newCalibrationValue);
+        Serial.print("Value ");
+        Serial.print(newCalibrationValue);
+        Serial.print(" saved to EEPROM address: ");
+        Serial.println(calVal_eepromAdress);
+        _resume = true;
+        
+      }
+      else if (inByte == 'n') {
+        Serial.println("Value not saved to EEPROM");
+        _resume = true;
+      }
+    }
+  }
+  
+  Serial.println("End calibration");
+  Serial.println("***");
+  Serial.println("To re-calibrate, send 'r' from serial monitor.");
+  Serial.println("For manual edit of the calibration value, send 'c' from serial monitor.");
+  Serial.println("***");
+}
+
+void changeSavedCalFactor() {
+  float oldCalibrationValue = LoadCell.getCalFactor();
+  boolean _resume = false;
+  Serial.println("***");
+  Serial.print("Current value is: ");
+  Serial.println(oldCalibrationValue);
+  Serial.println("Now, send the new value from serial monitor, i.e. 696.0");
+  float newCalibrationValue;
+  while (_resume == false) {
+    if (Serial.available() > 0) {
+     newCalibrationValue = Serial.parseFloat();
+      if (newCalibrationValue != 0) {
+        Serial.print("New calibration value is: ");
+        Serial.println(newCalibrationValue);
+        LoadCell.setCalFactor(newCalibrationValue);
+        _resume = true;
+        }
+      }
+  }
+
+  _resume = false;
+  Serial.print("Save this value to EEPROM adress ");
+  Serial.print(calVal_eepromAdress);
+  Serial.println("? y/n");
+  while (_resume == false) {
+    if (Serial.available() > 0) {
+      char inByte = Serial.read();
+      if (inByte == 'y') {
+        #if defined(ESP8266)|| defined(ESP32)
+        EEPROM.begin(512);
+        #endif
+        EEPROM.put(calVal_eepromAdress, newCalibrationValue);
+        #if defined(ESP8266)|| defined(ESP32)
+        EEPROM.commit();
+        #endif
+        EEPROM.get(calVal_eepromAdress, newCalibrationValue);
+        Serial.print("Value ");
+        Serial.print(newCalibrationValue);
+        Serial.print(" saved to EEPROM address: ");
+        Serial.println(calVal_eepromAdress);
+        _resume = true;
+      }
+      else if (inByte == 'n') {
+        Serial.println("Value not saved to EEPROM");
+        _resume = true;
+      }
+    }
+  }
+  Serial.println("End change calibration value");
+  Serial.println("***");
+}
